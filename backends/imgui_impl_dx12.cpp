@@ -648,11 +648,22 @@ bool    ImGui_ImplDX12_CreateDeviceObjects()
               float2 uv  : TEXCOORD0;\
             };\
             \
+            float4 SRGBtoLinear(float4 srgbColor) {\
+                float3 linearColor;\
+                for (int i = 0; i < 3; ++i) { \
+                    if (srgbColor[i] <= 0.04045) { \
+                    linearColor[i] = srgbColor[i] / 12.92; \
+                    } else { \
+                        linearColor[i] = pow((srgbColor[i] + 0.055) / 1.055, 2.4); \
+                    }\
+                }\
+                return float4(linearColor, srgbColor.a);\
+            }\
             PS_INPUT main(VS_INPUT input)\
             {\
               PS_INPUT output;\
               output.pos = mul( ProjectionMatrix, float4(input.pos.xy, 0.f, 1.f));\
-              output.col = input.col;\
+              output.col = SRGBtoLinear(input.col);\
               output.uv  = input.uv;\
               return output;\
             }";
