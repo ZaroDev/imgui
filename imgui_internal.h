@@ -1,4 +1,4 @@
-// dear imgui, v1.89.9 WIP
+// dear imgui, v1.90 WIP
 // (internal structures/api)
 
 // You may use this file to debug, understand or extend Dear ImGui features but we don't provide any guarantee of forward compatibility.
@@ -135,6 +135,7 @@ struct ImGuiLastItemData;           // Status storage for last submitted items
 struct ImGuiLocEntry;               // A localization entry.
 struct ImGuiMenuColumns;            // Simple column measurement, currently used for MenuItem() only
 struct ImGuiNavItemData;            // Result of a gamepad/keyboard directional navigation move query result
+struct ImGuiNavTreeNodeData;        // Temporary storage for last TreeNode() being a Left arrow landing candidate.
 struct ImGuiMetricsConfig;          // Storage for ShowMetricsWindow() and DebugNodeXXX() functions
 struct ImGuiNextWindowData;         // Storage for SetNextWindow** functions
 struct ImGuiNextItemData;           // Storage for SetNextItem** functions
@@ -884,7 +885,7 @@ enum ImGuiComboFlagsPrivate_
 enum ImGuiSliderFlagsPrivate_
 {
     ImGuiSliderFlags_Vertical               = 1 << 20,  // Should this slider be orientated vertically?
-    ImGuiSliderFlags_ReadOnly               = 1 << 21,
+    ImGuiSliderFlags_ReadOnly               = 1 << 21,  // Consider using g.NextItemData.ItemFlags |= ImGuiItemFlags_ReadOnly instead.
 };
 
 // Extend ImGuiSelectableFlags_
@@ -1199,6 +1200,16 @@ struct ImGuiLastItemData
     ImRect                  DisplayRect;        // Display rectangle (only if ImGuiItemStatusFlags_HasDisplayRect is set)
 
     ImGuiLastItemData()     { memset(this, 0, sizeof(*this)); }
+};
+
+// Store data emitted by TreeNode() for usage by TreePop() to implement ImGuiTreeNodeFlags_NavLeftJumpsBackHere.
+// This is the minimum amount of data that we need to perform the equivalent of NavApplyItemToResult() and which we can't infer in TreePop()
+// Only stored when the node is a potential candidate for landing on a Left arrow jump.
+struct ImGuiNavTreeNodeData
+{
+    ImGuiID                 ID;
+    ImGuiItemFlags          InFlags;
+    ImRect                  NavRect;
 };
 
 struct IMGUI_API ImGuiStackSizes
@@ -1857,14 +1868,16 @@ struct ImGuiContext
     ImGuiNextWindowData     NextWindowData;                     // Storage for SetNextWindow** functions
 
     // Shared stacks
-    ImVector<ImGuiColorMod> ColorStack;                         // Stack for PushStyleColor()/PopStyleColor() - inherited by Begin()
-    ImVector<ImGuiStyleMod> StyleVarStack;                      // Stack for PushStyleVar()/PopStyleVar() - inherited by Begin()
-    ImVector<ImFont*>       FontStack;                          // Stack for PushFont()/PopFont() - inherited by Begin()
-    ImVector<ImGuiID>       FocusScopeStack;                    // Stack for PushFocusScope()/PopFocusScope() - inherited by BeginChild(), pushed into by Begin()
-    ImVector<ImGuiItemFlags>ItemFlagsStack;                     // Stack for PushItemFlag()/PopItemFlag() - inherited by Begin()
-    ImVector<ImGuiGroupData>GroupStack;                         // Stack for BeginGroup()/EndGroup() - not inherited by Begin()
-    ImVector<ImGuiPopupData>OpenPopupStack;                     // Which popups are open (persistent)
-    ImVector<ImGuiPopupData>BeginPopupStack;                    // Which level of BeginPopup() we are in (reset every frame)
+    ImVector<ImGuiColorMod>     ColorStack;                     // Stack for PushStyleColor()/PopStyleColor() - inherited by Begin()
+    ImVector<ImGuiStyleMod>     StyleVarStack;                  // Stack for PushStyleVar()/PopStyleVar() - inherited by Begin()
+    ImVector<ImFont*>           FontStack;                      // Stack for PushFont()/PopFont() - inherited by Begin()
+    ImVector<ImGuiID>           FocusScopeStack;                // Stack for PushFocusScope()/PopFocusScope() - inherited by BeginChild(), pushed into by Begin()
+    ImVector<ImGuiItemFlags>    ItemFlagsStack;                 // Stack for PushItemFlag()/PopItemFlag() - inherited by Begin()
+    ImVector<ImGuiGroupData>    GroupStack;                     // Stack for BeginGroup()/EndGroup() - not inherited by Begin()
+    ImVector<ImGuiPopupData>    OpenPopupStack;                 // Which popups are open (persistent)
+    ImVector<ImGuiPopupData>    BeginPopupStack;                // Which level of BeginPopup() we are in (reset every frame)
+    ImVector<ImGuiNavTreeNodeData> NavTreeNodeStack;            // Stack for TreeNode() when a NavLeft requested is emitted.
+
     int                     BeginMenuCount;
 
     // Viewports
@@ -2001,6 +2014,7 @@ struct ImGuiContext
     float                   ScrollbarClickDeltaToGrabCenter;    // Distance between mouse and center of grab box, normalized in parent space. Use storage?
     float                   DisabledAlphaBackup;                // Backup for style.Alpha for BeginDisabled()
     short                   DisabledStackSize;
+    short                   LockMarkEdited;
     short                   TooltipOverrideCount;
     ImVector<char>          ClipboardHandlerData;               // If no custom clipboard handler is defined
     ImVector<ImGuiID>       MenusIdSubmittedThisFrame;          // A list of menu IDs that were rendered at least once
@@ -2008,7 +2022,6 @@ struct ImGuiContext
     // Platform support
     ImGuiPlatformImeData    PlatformImeData;                    // Data updated by current frame
     ImGuiPlatformImeData    PlatformImeDataPrev;                // Previous frame data (when changing we will call io.SetPlatformImeDataFn
-    char                    PlatformLocaleDecimalPoint;         // '.' or *localeconv()->decimal_point
 
     // Settings
     bool                    SettingsLoaded;
@@ -2195,11 +2208,11 @@ struct ImGuiContext
         ScrollbarClickDeltaToGrabCenter = 0.0f;
         DisabledAlphaBackup = 0.0f;
         DisabledStackSize = 0;
+        LockMarkEdited = 0;
         TooltipOverrideCount = 0;
 
         PlatformImeData.InputPos = ImVec2(0.0f, 0.0f);
         PlatformImeDataPrev.InputPos = ImVec2(-1.0f, -1.0f); // Different to ensure initial submission
-        PlatformLocaleDecimalPoint = '.';
 
         SettingsLoaded = false;
         SettingsDirtyTimer = 0.0f;
@@ -2604,6 +2617,7 @@ struct IMGUI_API ImGuiTable
     float                       RowPosY1;
     float                       RowPosY2;
     float                       RowMinHeight;               // Height submitted to TableNextRow()
+    float                       RowCellPaddingY;            // Top and bottom padding. Reloaded during row change.
     float                       RowTextBaseline;
     float                       RowIndentOffsetX;
     ImGuiTableRowFlags          RowFlags : 16;              // Current row flags, see ImGuiTableRowFlags_
@@ -2617,9 +2631,8 @@ struct IMGUI_API ImGuiTable
     float                       HostIndentX;
     float                       MinColumnWidth;
     float                       OuterPaddingX;
-    float                       CellPaddingX;               // Padding from each borders
-    float                       CellPaddingY;
-    float                       CellSpacingX1;              // Spacing between non-bordered cells
+    float                       CellPaddingX;               // Padding from each borders. Locked in BeginTable()/Layout.
+    float                       CellSpacingX1;              // Spacing between non-bordered cells. Locked in BeginTable()/Layout.
     float                       CellSpacingX2;
     float                       InnerWidth;                 // User value passed to BeginTable(), see comments at the top of BeginTable() for details.
     float                       ColumnsGivenWidth;          // Sum of current column width
@@ -2930,6 +2943,7 @@ namespace ImGui
     IMGUI_API void          NavMoveRequestSubmit(ImGuiDir move_dir, ImGuiDir clip_dir, ImGuiNavMoveFlags move_flags, ImGuiScrollFlags scroll_flags);
     IMGUI_API void          NavMoveRequestForward(ImGuiDir move_dir, ImGuiDir clip_dir, ImGuiNavMoveFlags move_flags, ImGuiScrollFlags scroll_flags);
     IMGUI_API void          NavMoveRequestResolveWithLastItem(ImGuiNavItemData* result);
+    IMGUI_API void          NavMoveRequestResolveWithPastTreeNode(ImGuiNavItemData* result, ImGuiNavTreeNodeData* tree_node_data);
     IMGUI_API void          NavMoveRequestCancel();
     IMGUI_API void          NavMoveRequestApplyResult();
     IMGUI_API void          NavMoveRequestTryWrapping(ImGuiWindow* window, ImGuiNavMoveFlags move_flags);
@@ -3233,10 +3247,12 @@ namespace ImGui
     IMGUI_API void          ErrorCheckEndFrameRecover(ImGuiErrorLogCallback log_callback, void* user_data = NULL);
     IMGUI_API void          ErrorCheckEndWindowRecover(ImGuiErrorLogCallback log_callback, void* user_data = NULL);
     IMGUI_API void          ErrorCheckUsingSetCursorPosToExtendParentBoundaries();
+    IMGUI_API void          DebugDrawCursorPos(ImU32 col = IM_COL32(255, 0, 0, 255));
+    IMGUI_API void          DebugDrawLineExtents(ImU32 col = IM_COL32(255, 0, 0, 255));
+    IMGUI_API void          DebugDrawItemRect(ImU32 col = IM_COL32(255, 0, 0, 255));
     IMGUI_API void          DebugLocateItem(ImGuiID target_id);                     // Call sparingly: only 1 at the same time!
     IMGUI_API void          DebugLocateItemOnHover(ImGuiID target_id);              // Only call on reaction to a mouse Hover: because only 1 at the same time!
     IMGUI_API void          DebugLocateItemResolveWithLastItem();
-    inline void             DebugDrawItemRect(ImU32 col = IM_COL32(255,0,0,255))    { ImGuiContext& g = *GImGui; ImGuiWindow* window = g.CurrentWindow; GetForegroundDrawList(window)->AddRect(g.LastItemData.Rect.Min, g.LastItemData.Rect.Max, col); }
     inline void             DebugStartItemPicker()                                  { ImGuiContext& g = *GImGui; g.DebugItemPickerActive = true; }
     IMGUI_API void          ShowFontAtlas(ImFontAtlas* atlas);
     IMGUI_API void          DebugHookIdInfo(ImGuiID id, ImGuiDataType data_type, const void* data_id, const void* data_id_end);
